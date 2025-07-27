@@ -262,7 +262,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 For issues, questions, or contributions:
 - 🐛 **Bug Reports**: Open an issue on GitHub
 - 💡 **Feature Requests**: Submit enhancement proposals
-- 📧 **Contact**: [Your contact information]
 
 ---
 
