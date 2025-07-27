@@ -1,17 +1,25 @@
 ﻿import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# Try to load .env file, but don't fail if it doesn't work
+try:
+    load_dotenv()
+except Exception as e:
+    print(f"Warning: Could not load .env file: {e}")
 
 class Config:
-    OPENAI_API_KEY = "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"
+    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+    
+    # Validate API key is loaded
+    if not OPENAI_API_KEY:
+        print("Error: OPENAI_API_KEY not found. Please check your .env file or environment variables.")
+    
     RXNORM_BASE_URL = "https://rxnav.nlm.nih.gov/REST"
     BATCH_SIZE = 10
-    RATE_LIMIT_DELAY = 1  # seconds between API calls
+    RATE_LIMIT_DELAY = 1
     OUTPUT_DIR = "output"
     INPUT_FILE = "refdesmedicamentscnops.xlsx"
     
-    # Prompt engineering settings
     OPENAI_MODEL = "gpt-4"
     OPENAI_TEMPERATURE = 0.2
     OPENAI_MAX_TOKENS = 800
