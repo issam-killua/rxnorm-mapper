@@ -1,0 +1,7 @@
+﻿.env
+__pycache__/
+*.pyc
+venv/
+batch_*.jsonl
+output/*.csv
+*.log
