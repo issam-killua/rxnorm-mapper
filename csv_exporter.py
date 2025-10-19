@@ -22,6 +22,9 @@ class CSVExporter:
             # Original product data
             original_data = result.get('original_data', {})
             
+            # Translation data (for hybrid method)
+            translation = result.get('translation', {})
+            
             # AI mapping results
             ai_mapping = result.get('ai_mapping', {})
             
@@ -38,7 +41,16 @@ class CSVExporter:
                 'original_presentation': original_data.get('presentation', ''),
                 'original_full_dosage': original_data.get('full_dosage', ''),
                 
-                # AI mapping results
+                # Translation results (for hybrid method)
+                'translated_product_name': translation.get('product_name_english', ''),
+                'translated_dci': translation.get('active_ingredient_english', ''),
+                'translated_dosage': translation.get('dosage_standardized', ''),
+                'translated_form': translation.get('form_standardized', ''),
+                
+                # Mapping method
+                'mapping_method': result.get('mapping_method', 'openai'),
+                
+                # AI mapping results (if applicable)
                 'ai_primary_concept': ai_mapping.get('primary_rxnorm_concept', '') if ai_mapping else '',
                 'ai_confidence_score': ai_mapping.get('confidence_score', 0) if ai_mapping else 0,
                 'ai_alternative_concepts': str(ai_mapping.get('alternative_concepts', [])) if ai_mapping else '',
