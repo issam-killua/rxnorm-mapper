@@ -2,6 +2,7 @@ import time
 import pandas as pd
 from typing import Dict, List, Optional
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from config import Config
 from data_processor import DataProcessor
 from mistral_translator import MistralTranslator
@@ -15,78 +16,171 @@ class HybridMappingEngine:
         self.mistral_api_key = mistral_api_key
         self.openai_api_key = openai_api_key
         
-        # Initialize components based on available keys
+        # Initialize direct RxNorm mapper with Mistral for form translation
         if mistral_api_key:
-            self.translator = MistralTranslator(mistral_api_key)
+            self.direct_mapper = DirectRxNormMapper(mistral_api_key)
+        else:
             self.direct_mapper = DirectRxNormMapper()
-        
-        # Initialize OpenAI components only if key is provided
+            
+        # Initialize other components if needed for fallback
         if openai_api_key:
             self.ai_mapper = OpenAIMapper(openai_api_key)
         else:
             self.ai_mapper = None
             
-        # Always initialize RxNorm validator (no API key needed)
+        # Always initialize RxNorm validator for fallback strategies
         self.rxnorm_validator = RxNormValidator()
-        
-        # Connect components if available
-        if hasattr(self, 'direct_mapper'):
-            self.direct_mapper.set_validator(self.rxnorm_validator)
-        
+            
         # Results storage
         self.results = []
-    
-    def process_single_product(self, product_row: pd.Series, index: int) -> Dict:
-        """Process a single product through the hybrid mapping pipeline"""
         
-        # Ensure we have necessary components
-        if not hasattr(self, 'translator') or not hasattr(self, 'direct_mapper'):
-            raise ValueError("Mistral API key is required for hybrid processing")
-        
-        if not self.ai_mapper:
-            raise ValueError("OpenAI API key is required for hybrid processing with fallback")
-        
-        # Prepare product context
-        data_processor = DataProcessor("")
-        product_context = data_processor.prepare_product_context(product_row)
-        
-        result = {
-            'index': index,
-            'original_data': product_context,
-            'timestamp': pd.Timestamp.now(),
-            'processing_status': 'started'
+        # Statistics tracking
+        self.stats = {
+            "total_processed": 0,
+            "successful": 0,
+            "failed": 0,
+            "needs_review": 0,
+            "direct_mapping_success": 0,
+            "processing_time": 0,
+            "start_time": None
         }
+    
+    def process_dataframe_direct(self, df: pd.DataFrame, batch_size: int = 50, max_workers: int = 10) -> List[Dict]:
+        """Process entire dataframe using optimized direct mapping approach"""
+        self.stats["start_time"] = time.time()
+        print(f"Starting direct mapping of {len(df)} products with batch size {batch_size} and {max_workers} workers")
         
+        # Process using the DirectRxNormMapper's batch processing
+        all_results = self.direct_mapper.process_dataframe_batch(df, batch_size)
+        
+        # Store results and update statistics
+        self.results = all_results
+        
+        # Update statistics
+        self.stats["total_processed"] = len(all_results)
+        self.stats["successful"] = sum(1 for r in all_results if r.get('final_status') == 'success')
+        self.stats["failed"] = sum(1 for r in all_results if r.get('final_status') in ['failed', 'error'])
+        self.stats["needs_review"] = sum(1 for r in all_results if r.get('needs_review', False))
+        self.stats["direct_mapping_success"] = self.stats["successful"]
+        self.stats["processing_time"] = time.time() - self.stats["start_time"]
+        
+        # Print final statistics
+        print("\n" + "="*60)
+        print("MAPPING STATISTICS")
+        print("="*60)
+        print(f"Total Products Processed: {self.stats['total_processed']}")
+        print(f"Successful Mappings: {self.stats['successful']}")
+        print(f"Failed Mappings: {self.stats['failed']}")
+        print(f"Need Manual Review: {self.stats['needs_review']}")
+        
+        success_rate = (self.stats['successful'] / self.stats['total_processed'] * 100) if self.stats['total_processed'] > 0 else 0
+        print(f"Success Rate: {success_rate:.2f}%")
+        
+        review_rate = (self.stats['needs_review'] / self.stats['total_processed'] * 100) if self.stats['total_processed'] > 0 else 0
+        print(f"Review Rate: {review_rate:.2f}%")
+        
+        processing_time = self.stats['processing_time']
+        print(f"Processing Time: {processing_time:.2f} seconds ({processing_time/60:.2f} minutes)")
+        
+        products_per_second = self.stats['total_processed'] / processing_time if processing_time > 0 else 0
+        print(f"Processing Speed: {products_per_second:.2f} products per second")
+        print("="*60)
+        
+        return all_results
+    
+    def process_with_fallback(self, df: pd.DataFrame, batch_size: int = 50, max_workers: int = 10) -> List[Dict]:
+        """Process dataframe with direct mapping and OpenAI fallback for failed mappings"""
+        self.stats["start_time"] = time.time()
+        print(f"Starting direct mapping with fallback of {len(df)} products with batch size {batch_size}")
+        
+        # First attempt direct mapping for all products
+        all_results = self.direct_mapper.process_dataframe_batch(df, batch_size)
+        
+        # Identify failed products for OpenAI fallback
+        failed_indices = [i for i, r in enumerate(all_results) if r.get('final_status') != 'success']
+        failed_count = len(failed_indices)
+        
+        print(f"Initial direct mapping complete: {len(all_results) - failed_count}/{len(all_results)} successful")
+        
+        # Only attempt fallback if OpenAI API is available and there are failed products
+        if self.ai_mapper and failed_count > 0 and self.openai_api_key:
+            print(f"Attempting OpenAI fallback for {failed_count} products")
+            
+            # Create a data processor for the fallback
+            data_processor = DataProcessor("")
+            
+            # Process failed products with OpenAI in parallel batches
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                
+                # Submit all failed products for OpenAI processing
+                for idx in failed_indices:
+                    product_row = df.iloc[idx]
+                    product_context = data_processor.prepare_product_context(product_row)
+                    
+                    futures.append(executor.submit(self._process_with_openai_fallback, 
+                                                 product_context, 
+                                                 idx,
+                                                 all_results[idx]))
+                
+                # Collect results
+                for future in ThreadPoolExecutor.as_completed(futures):
+                    try:
+                        result = future.result()
+                        # The result is already updated in all_results
+                    except Exception as e:
+                        print(f"Error in fallback processing: {e}")
+        
+        # Store results
+        self.results = all_results
+        
+        # Update statistics
+        self.stats["total_processed"] = len(all_results)
+        self.stats["successful"] = sum(1 for r in all_results if r.get('final_status') == 'success')
+        self.stats["failed"] = sum(1 for r in all_results if r.get('final_status') in ['failed', 'error'])
+        self.stats["needs_review"] = sum(1 for r in all_results if r.get('needs_review', False))
+        self.stats["direct_mapping_success"] = len(all_results) - failed_count
+        self.stats["openai_success"] = self.stats["successful"] - self.stats["direct_mapping_success"]
+        self.stats["processing_time"] = time.time() - self.stats["start_time"]
+        
+        # Print final statistics
+        print("\n" + "="*60)
+        print("HYBRID MAPPING STATISTICS")
+        print("="*60)
+        print(f"Total Products Processed: {self.stats['total_processed']}")
+        print(f"Successful Mappings: {self.stats['successful']}")
+        print(f"Failed Mappings: {self.stats['failed']}")
+        print(f"Need Manual Review: {self.stats['needs_review']}")
+        
+        success_rate = (self.stats['successful'] / self.stats['total_processed'] * 100) if self.stats['total_processed'] > 0 else 0
+        print(f"Success Rate: {success_rate:.2f}%")
+        
+        direct_success_rate = (self.stats['direct_mapping_success'] / self.stats['total_processed'] * 100) if self.stats['total_processed'] > 0 else 0
+        print(f"Direct Mapping Success Rate: {direct_success_rate:.2f}%")
+        
+        if 'openai_success' in self.stats:
+            openai_attempt_count = failed_count
+            openai_success_rate = (self.stats['openai_success'] / openai_attempt_count * 100) if openai_attempt_count > 0 else 0
+            print(f"OpenAI Fallback Success Rate: {openai_success_rate:.2f}% ({self.stats['openai_success']}/{openai_attempt_count})")
+        
+        review_rate = (self.stats['needs_review'] / self.stats['total_processed'] * 100) if self.stats['total_processed'] > 0 else 0
+        print(f"Review Rate: {review_rate:.2f}%")
+        
+        processing_time = self.stats['processing_time']
+        print(f"Processing Time: {processing_time:.2f} seconds ({processing_time/60:.2f} minutes)")
+        
+        products_per_second = self.stats['total_processed'] / processing_time if processing_time > 0 else 0
+        print(f"Processing Speed: {products_per_second:.2f} products per second")
+        print("="*60)
+        
+        return all_results
+    
+    def _process_with_openai_fallback(self, product_context: Dict, index: int, existing_result: Dict) -> Dict:
+        """Process a single product with OpenAI fallback"""
         try:
-            # Step 1: Translation with Mistral API
-            print(f"Translating: {product_context['product_name']}")
-            translated_product = self.translator.translate_product(product_context)
-            result['translation'] = {
-                'product_name_english': translated_product.get('product_name_english', ''),
-                'active_ingredient_english': translated_product.get('active_ingredient_english', ''),
-                'dosage_standardized': translated_product.get('dosage_standardized', ''),
-                'form_standardized': translated_product.get('form_standardized', '')
-            }
-            result['processing_status'] = 'translated'
-            
-            # Step 2: Direct RxNorm Mapping
-            print(f"Direct mapping: {translated_product.get('active_ingredient_english', '')}")
-            direct_result = self.direct_mapper.map_product(translated_product)
-            
-            if direct_result.get('found'):
-                # Direct mapping successful
-                result['rxnorm_validation'] = direct_result
-                result['final_status'] = 'success'
-                result['mapping_method'] = 'direct'
-                result['needs_review'] = False
-                result['processing_status'] = 'completed'
-                return result
-            
-            # Step 3: Fallback to OpenAI + RxNorm API approach
-            print(f"Falling back to OpenAI for: {product_context['product_name']}")
+            # Use OpenAI mapper
             ai_result = self.ai_mapper.map_product(product_context)
-            result['ai_mapping'] = ai_result
-            result['processing_status'] = 'ai_completed'
+            existing_result['ai_mapping'] = ai_result
             
             if ai_result and ai_result.get('primary_rxnorm_concept'):
                 # Validate with RxNorm API
@@ -95,151 +189,46 @@ class HybridMappingEngine:
                     concepts_to_try.extend(ai_result['alternative_concepts'])
                 
                 rxnorm_result = self.rxnorm_validator.validate_multiple_concepts(concepts_to_try)
-                result['rxnorm_validation'] = rxnorm_result
-                result['mapping_method'] = 'openai'
-                result['processing_status'] = 'completed'
+                existing_result['rxnorm_validation'] = rxnorm_result
+                existing_result['mapping_method'] = 'openai_fallback'
                 
                 # Determine final status
                 if rxnorm_result.get('found'):
-                    result['final_status'] = 'success'
-                    result['needs_review'] = ai_result.get('confidence_score', 0) < 7
+                    existing_result['final_status'] = 'success'
+                    existing_result['needs_review'] = ai_result.get('confidence_score', 0) < 7
                 else:
-                    result['final_status'] = 'failed'
-                    result['needs_review'] = True
+                    existing_result['final_status'] = 'failed'
+                    existing_result['needs_review'] = True
             else:
-                result['final_status'] = 'failed'
-                result['needs_review'] = True
-                result['rxnorm_validation'] = {'found': False, 'error': 'Both mapping methods failed'}
-            
-        except Exception as e:
-            result['final_status'] = 'error'
-            result['error'] = str(e)
-            result['processing_status'] = 'error'
-            result['needs_review'] = True
-            print(f"Error processing product {index}: {str(e)}")
-        
-        return result
-    
-    def process_with_mistral_only(self, product_row: pd.Series, index: int) -> Dict:
-        """Process a product using only Mistral translation and direct mapping"""
-        
-        # Ensure we have necessary components
-        if not hasattr(self, 'translator') or not hasattr(self, 'direct_mapper'):
-            raise ValueError("Mistral API key is required for Mistral-only processing")
-        
-        # Prepare product context
-        data_processor = DataProcessor("")
-        product_context = data_processor.prepare_product_context(product_row)
-        
-        result = {
-            'index': index,
-            'original_data': product_context,
-            'timestamp': pd.Timestamp.now(),
-            'processing_status': 'started'
-        }
-        
-        try:
-            # Step 1: Translation with Mistral API
-            print(f"Translating: {product_context['product_name']}")
-            translated_product = self.translator.translate_product(product_context)
-            result['translation'] = {
-                'product_name_english': translated_product.get('product_name_english', ''),
-                'active_ingredient_english': translated_product.get('active_ingredient_english', ''),
-                'dosage_standardized': translated_product.get('dosage_standardized', ''),
-                'form_standardized': translated_product.get('form_standardized', '')
-            }
-            result['processing_status'] = 'translated'
-            
-            # Step 2: Direct RxNorm Mapping
-            print(f"Direct mapping: {translated_product.get('active_ingredient_english', '')}")
-            direct_result = self.direct_mapper.map_product(translated_product)
-            
-            if direct_result.get('found'):
-                # Direct mapping successful
-                result['rxnorm_validation'] = direct_result
-                result['final_status'] = 'success'
-                result['mapping_method'] = 'direct'
-                result['needs_review'] = False
-                result['processing_status'] = 'completed'
-            else:
-                # Direct mapping failed - no fallback
-                result['rxnorm_validation'] = direct_result
-                result['final_status'] = 'failed'
-                result['mapping_method'] = 'direct'
-                result['needs_review'] = True
-                result['processing_status'] = 'completed'
-                result['error'] = direct_result.get('error', 'Direct mapping failed')
+                existing_result['final_status'] = 'failed'
+                existing_result['needs_review'] = True
+                existing_result['error'] = "OpenAI fallback failed"
         
         except Exception as e:
-            result['final_status'] = 'error'
-            result['error'] = str(e)
-            result['processing_status'] = 'error'
-            result['needs_review'] = True
-            print(f"Error processing product {index}: {str(e)}")
-        
-        return result
-    
-    def process_batch(self, products_df: pd.DataFrame, start_idx: int = 0, batch_size: int = None) -> List[Dict]:
-        """Process a batch of products with hybrid approach (Mistral + OpenAI fallback)"""
-        if batch_size is None:
-            batch_size = Config.BATCH_SIZE
-        
-        end_idx = min(start_idx + batch_size, len(products_df))
-        batch_results = []
-        
-        print(f"Processing batch: {start_idx} to {end_idx}")
-        
-        for idx in range(start_idx, end_idx):
-            try:
-                result = self.process_single_product(products_df.iloc[idx], idx)
-                batch_results.append(result)
-                self.results.append(result)
-                
-                # Rate limiting
-                time.sleep(Config.RATE_LIMIT_DELAY)
-                
-            except Exception as e:
-                print(f"Error in batch processing at index {idx}: {e}")
-        
-        return batch_results
-    
-    def process_batch_mistral_only(self, products_df: pd.DataFrame, start_idx: int = 0, batch_size: int = None) -> List[Dict]:
-        """Process a batch of products with Mistral only (no OpenAI fallback)"""
-        if batch_size is None:
-            batch_size = Config.BATCH_SIZE
-        
-        end_idx = min(start_idx + batch_size, len(products_df))
-        batch_results = []
-        
-        print(f"Processing batch with Mistral only: {start_idx} to {end_idx}")
-        
-        for idx in range(start_idx, end_idx):
-            try:
-                result = self.process_with_mistral_only(products_df.iloc[idx], idx)
-                batch_results.append(result)
-                self.results.append(result)
-                
-                # Rate limiting
-                time.sleep(Config.RATE_LIMIT_DELAY)
-                
-            except Exception as e:
-                print(f"Error in batch processing at index {idx}: {e}")
-        
-        return batch_results
+            existing_result['error'] = f"OpenAI fallback error: {str(e)}"
+            existing_result['final_status'] = 'error'
+            existing_result['needs_review'] = True
+            
+        return existing_result
     
     def get_statistics(self) -> Dict:
-        """Calculate processing statistics"""
+        """Get processing statistics"""
         if not self.results:
             return {}
         
         total = len(self.results)
-        successful = len([r for r in self.results if r.get('final_status') == 'success'])
-        failed = len([r for r in self.results if r.get('final_status') in ['failed', 'error']])
-        needs_review = len([r for r in self.results if r.get('needs_review', False)])
+        successful = sum(1 for r in self.results if r.get('final_status') == 'success')
+        failed = sum(1 for r in self.results if r.get('final_status') in ['failed', 'error'])
+        needs_review = sum(1 for r in self.results if r.get('needs_review', False))
         
         # Method statistics
-        direct_method = len([r for r in self.results if r.get('mapping_method') == 'direct'])
-        openai_method = len([r for r in self.results if r.get('mapping_method') == 'openai'])
+        direct_method = sum(1 for r in self.results if 
+                          r.get('mapping_method', '') == 'direct_rxnorm' and 
+                          r.get('final_status') == 'success')
+        
+        openai_method = sum(1 for r in self.results if 
+                          r.get('mapping_method', '') == 'openai_fallback' and 
+                          r.get('final_status') == 'success')
         
         return {
             'total_processed': total,
@@ -250,5 +239,6 @@ class HybridMappingEngine:
             'review_rate': (needs_review / total * 100) if total > 0 else 0,
             'direct_mapping_count': direct_method,
             'openai_mapping_count': openai_method,
-            'direct_mapping_rate': (direct_method / total * 100) if total > 0 else 0
+            'direct_mapping_rate': (direct_method / total * 100) if total > 0 else 0,
+            'processing_time': self.stats.get('processing_time', 0)
         }

@@ -1,111 +1,146 @@
 import requests
 import json
 from typing import Dict, List, Optional
+import time
 from config import Config
 
 class MistralTranslator:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.api_url = "https://api.mistral.ai/v1/chat/completions"
+        self.form_translation_cache = {}  # Cache for pharmaceutical form translations
+        self.presentation_translation_cache = {}  # Cache for presentation translations
         
-    def translate_product(self, product_context: Dict) -> Dict:
-        """Translate product information from French/Arabic to English"""
+        # Initialize cache with common forms from config
+        for french, english in Config.FORM_TRANSLATIONS.items():
+            self.form_translation_cache[french.upper()] = english
+    
+    def translate_terms_batch(self, terms: List[str], term_type: str = "pharmaceutical") -> Dict[str, str]:
+        """Translate a batch of terms from French to English"""
+        if not terms:
+            return {}
+            
+        # Remove duplicates and empty terms
+        unique_terms = list(set([t for t in terms if t and t.strip()]))
         
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        # Check which terms need translation (not in cache)
+        cache = self.form_translation_cache if term_type == "form" else self.presentation_translation_cache
+        terms_to_translate = [t for t in unique_terms if t.upper() not in cache]
         
-        prompt = self._create_translation_prompt(product_context)
-        
-        payload = {
-            "model": Config.MISTRAL_MODEL,
-            "messages": [
-                {"role": "system", "content": "You are a professional pharmaceutical translator. Translate the following medical product information from French/Arabic to English."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": Config.MISTRAL_TEMPERATURE,
-            "max_tokens": Config.MISTRAL_MAX_TOKENS
-        }
-        
+        if not terms_to_translate:
+            # All terms are in cache, return cached translations
+            return {t: cache.get(t.upper(), t) for t in unique_terms}
+            
         try:
-            response = requests.post(self.api_url, headers=headers, json=payload)
+            # Prepare batch translation prompt
+            terms_list = "\n".join([f"{i+1}. {term}" for i, term in enumerate(terms_to_translate)])
+            
+            prompt = f"""Translate these {term_type} terms from French to standardized English pharmaceutical terminology.
+Respond ONLY with a JSON object mapping each French term to its English equivalent.
+
+Terms to translate:
+{terms_list}
+
+Example response format:
+{{
+  "COMPRIME": "TABLET",
+  "GELULE": "CAPSULE"
+}}
+"""
+            
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": Config.MISTRAL_MODEL,
+                "messages": [
+                    {"role": "system", "content": "You are a professional pharmaceutical translator that responds only with valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": Config.MISTRAL_TEMPERATURE,
+                "max_tokens": Config.MISTRAL_MAX_TOKENS,
+                "response_format": {"type": "json_object"}
+            }
+            
+            response = requests.post(
+                self.api_url, 
+                headers=headers, 
+                json=payload, 
+                timeout=Config.MISTRAL_TIMEOUT
+            )
             response.raise_for_status()
             
             result = response.json()
             content = result['choices'][0]['message']['content']
             
-            # Parse the translated content
-            translated_data = self._parse_translation_response(content, product_context)
-            return translated_data
+            # Parse JSON response
+            translations = json.loads(content)
             
+            # Update cache with new translations
+            for french, english in translations.items():
+                cache[french.upper()] = english.upper()
+            
+            # Return translations for all requested terms
+            all_translations = {}
+            for term in unique_terms:
+                if term.upper() in cache:
+                    all_translations[term] = cache[term.upper()]
+                else:
+                    # If translation failed, use original term
+                    all_translations[term] = term
+                    
+            return all_translations
+                
         except Exception as e:
-            print(f"Translation error: {str(e)}")
-            return product_context  # Return original context if translation fails
+            print(f"Batch translation error: {str(e)}")
+            # Return original terms if translation failed
+            return {t: t for t in unique_terms}
     
-    def _create_translation_prompt(self, product_context: Dict) -> str:
-        """Create a prompt for translation"""
+    def translate_product_forms(self, products: List[Dict]) -> List[Dict]:
+        """Translate form field for a batch of products"""
+        # Extract all unique forms
+        all_forms = [p.get('form', '') for p in products if p.get('form')]
         
-        prompt = f"""Translate the following pharmaceutical product information from French/Arabic to standardized English terminology:
-
-Product Name: {product_context['product_name']}
-Active Ingredient (DCI): {product_context['active_ingredient']}
-Dosage: {product_context['dosage']} {product_context['dosage_unit']}
-Pharmaceutical Form: {product_context['form']}
-Presentation: {product_context['presentation']}
-
-Respond with a JSON structure containing these translated fields:
-- product_name_english
-- active_ingredient_english
-- dosage_standardized (with units in standardized format)
-- form_standardized
-- presentation_english
-"""
-        return prompt
+        # Batch translate all forms
+        form_translations = self.translate_terms_batch(all_forms, "form")
+        
+        # Extract all unique presentations
+        all_presentations = [p.get('presentation', '') for p in products if p.get('presentation')]
+        
+        # Batch translate all presentations
+        presentation_translations = self.translate_terms_batch(all_presentations, "presentation")
+        
+        # Update products with translations
+        translated_products = []
+        for product in products:
+            translated = product.copy()
+            
+            # Add form translation if available
+            form = product.get('form', '')
+            if form:
+                translated['form_standardized'] = form_translations.get(form, form)
+            
+            # Add presentation translation if available
+            presentation = product.get('presentation', '')
+            if presentation:
+                translated['presentation_english'] = presentation_translations.get(presentation, presentation)
+            
+            translated_products.append(translated)
+        
+        return translated_products
     
-    def _parse_translation_response(self, content: str, original_context: Dict) -> Dict:
-        """Parse the translation response from Mistral"""
-        try:
-            # Clean up the response to ensure it's valid JSON
-            if content.startswith('```json'):
-                content = content[7:]
-            if content.endswith('```'):
-                content = content[:-3]
-            content = content.strip()
-            
-            translated = json.loads(content)
-            
-            # Merge with original context
-            result = original_context.copy()
-            result['product_name_english'] = translated.get('product_name_english', '')
-            result['active_ingredient_english'] = translated.get('active_ingredient_english', '')
-            result['dosage_standardized'] = translated.get('dosage_standardized', '')
-            result['form_standardized'] = translated.get('form_standardized', '')
-            result['presentation_english'] = translated.get('presentation_english', '')
-            
-            return result
-            
-        except json.JSONDecodeError:
-            # If JSON parsing fails, try to extract information through other means
-            result = original_context.copy()
-            lines = content.strip().split('\n')
-            for line in lines:
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    key = key.strip().lower().replace(' ', '_')
-                    value = value.strip()
-                    if 'product_name' in key:
-                        result['product_name_english'] = value
-                    elif 'active' in key or 'ingredient' in key:
-                        result['active_ingredient_english'] = value
-                    elif 'dosage' in key:
-                        result['dosage_standardized'] = value
-                    elif 'form' in key:
-                        result['form_standardized'] = value
-                    elif 'presentation' in key:
-                        result['presentation_english'] = value
-            
-            return result
-        except Exception as e:
-            print(f"Error parsing translation: {str(e)}")
-            return original_context
+    def translate_product(self, product_context: Dict) -> Dict:
+        """Translate a single product's form and presentation"""
+        # Create a list with just this product
+        products = [product_context]
+        
+        # Use batch translation method
+        translated_products = self.translate_product_forms(products)
+        
+        # Return the translated product
+        if translated_products:
+            return translated_products[0]
+        else:
+            return product_context  # Return original if translation failed
