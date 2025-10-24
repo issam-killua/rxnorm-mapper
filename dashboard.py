@@ -4,7 +4,6 @@ import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 from scipy import stats
-import seaborn as sns
 import re
 
 
@@ -228,7 +227,7 @@ def create_dashboard():
         else:
             st.info("Please upload both Direct and OpenAI result files to analyze matched products.")
 
-    # Tab 6 - RxNorm Hierarchy Analysis (NEW)
+    # Tab 6 - RxNorm Hierarchy Analysis (FIXED FOR OLDER STREAMLIT VERSIONS)
     with tabs[5]:
         if direct_file and openai_file:
             try:
@@ -323,11 +322,82 @@ def standardize_column_names(df):
     
     return standardized_df
 
+def translate_form_names(form):
+    """Translate French pharmaceutical form names to English"""
+    if not isinstance(form, str):
+        return form
+    
+    # Translation dictionary
+    translations = {
+        # French -> English
+        'comprimé': 'tablet',
+        'comprime': 'tablet',
+        'comprimés': 'tablets',
+        'comprimes': 'tablets',
+        'comprimé pelliculé': 'film-coated tablet',
+        'comprime pellicule': 'film-coated tablet',
+        'comprimés pelliculés': 'film-coated tablets',
+        'comprimes pellicules': 'film-coated tablets',
+        'gélule': 'capsule',
+        'gelule': 'capsule',
+        'gélules': 'capsules',
+        'gelules': 'capsules',
+        'solution buvable': 'oral solution',
+        'solution injectable': 'injectable solution',
+        'solution pour injection': 'solution for injection',
+        'poudre pour solution': 'powder for solution',
+        'suspension buvable': 'oral suspension',
+        'sirop': 'syrup',
+        'suppositoire': 'suppository',
+        'suppositoires': 'suppositories',
+        'sachet': 'sachet',
+        'sachets': 'sachets',
+        'collyre': 'eye drops',
+        'pommade': 'ointment',
+        'crème': 'cream',
+        'creme': 'cream',
+        'solution pour perfusion': 'solution for infusion',
+        'spray': 'spray',
+        'gouttes': 'drops',
+        
+        # Specific terms
+        'comprimé à libération prolongée': 'extended release tablet',
+        'comprime a liberation prolongee': 'extended release tablet',
+        'comprimé à croquer': 'chewable tablet',
+        'comprime a croquer': 'chewable tablet',
+        'comprimé dispersible': 'dispersible tablet',
+        'comprime dispersible': 'dispersible tablet',
+        'comprimé effervescent': 'effervescent tablet',
+        'comprime effervescent': 'effervescent tablet',
+        'solution pour inhalation': 'inhalation solution',
+    }
+    
+    form_lower = form.lower()
+    
+    # Check for exact matches first
+    if form_lower in translations:
+        return translations[form_lower]
+    
+    # Check for partial matches
+    for french, english in translations.items():
+        if french in form_lower:
+            return form.lower().replace(french, english)
+    
+    return form
+
 def display_single_results(df):
     """Display analysis for a single results file"""
     
     # Standardize column names
     df = standardize_column_names(df)
+    
+    # Ensure rxnorm_rxcui is treated as a string
+    if 'rxnorm_rxcui' in df.columns:
+        df['rxnorm_rxcui'] = df['rxnorm_rxcui'].astype(str)
+    
+    # Translate form names if present
+    if 'original_form' in df.columns:
+        df['display_form'] = df['original_form'].apply(translate_form_names)
     
     st.subheader("📊 Results Overview")
     
@@ -423,8 +493,11 @@ def display_single_results(df):
         
         try:
             if df['original_form'].notna().any():
+                # Use translated form names for display
+                form_column = 'display_form' if 'display_form' in df.columns else 'original_form'
+                
                 # Top forms
-                top_forms = df['original_form'].value_counts().reset_index()
+                top_forms = df[form_column].value_counts().reset_index()
                 top_forms.columns = ['Form', 'Count']
                 top_forms = top_forms.head(10)
                 
@@ -438,17 +511,18 @@ def display_single_results(df):
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # Success rate by form
-                form_success = df.groupby('original_form')['success'].agg(['count', 'sum']).reset_index()
-                form_success['success_rate'] = form_success['sum'] / form_success['count'] * 100
-                form_success = form_success.sort_values('count', ascending=False).head(10)
+                form_success = df.groupby(form_column)['success'].agg(['count', 'sum']).reset_index()
+                form_success.columns = ['Form', 'Count', 'Successes']
+                form_success['success_rate'] = form_success['Successes'] / form_success['Count'] * 100
+                form_success = form_success.sort_values('Count', ascending=False).head(10)
                 
                 fig = px.bar(
                     form_success,
-                    x='original_form',
+                    x='Form',
                     y='success_rate',
                     title="Success Rate by Pharmaceutical Form (Top 10 by Frequency)",
-                    labels={'original_form': 'Form', 'success_rate': 'Success Rate (%)'},
-                    text=form_success['count'],
+                    labels={'Form': 'Form', 'success_rate': 'Success Rate (%)'},
+                    text=form_success['Count'],
                     color='success_rate',
                     color_continuous_scale='RdYlGn'
                 )
@@ -473,6 +547,18 @@ def display_comparison(direct_df, openai_df):
     # Standardize column names
     direct_df = standardize_column_names(direct_df)
     openai_df = standardize_column_names(openai_df)
+    
+    # Ensure rxnorm_rxcui is treated as a string
+    if 'rxnorm_rxcui' in direct_df.columns:
+        direct_df['rxnorm_rxcui'] = direct_df['rxnorm_rxcui'].astype(str)
+    if 'rxnorm_rxcui' in openai_df.columns:
+        openai_df['rxnorm_rxcui'] = openai_df['rxnorm_rxcui'].astype(str)
+    
+    # Translate form names if present
+    if 'original_form' in direct_df.columns:
+        direct_df['display_form'] = direct_df['original_form'].apply(translate_form_names)
+    if 'original_form' in openai_df.columns:
+        openai_df['display_form'] = openai_df['original_form'].apply(translate_form_names)
     
     st.subheader("📊 Method Comparison")
     
@@ -612,6 +698,12 @@ def display_statistical_analysis(direct_df, openai_df):
     direct_df = standardize_column_names(direct_df)
     openai_df = standardize_column_names(openai_df)
     
+    # Ensure rxnorm_rxcui is treated as a string
+    if 'rxnorm_rxcui' in direct_df.columns:
+        direct_df['rxnorm_rxcui'] = direct_df['rxnorm_rxcui'].astype(str)
+    if 'rxnorm_rxcui' in openai_df.columns:
+        openai_df['rxnorm_rxcui'] = openai_df['rxnorm_rxcui'].astype(str)
+    
     st.subheader("📊 Statistical Analysis")
     
     # Check if success column is available
@@ -743,6 +835,18 @@ def display_dataset_comparison(direct_df, openai_df):
     direct_df = standardize_column_names(direct_df)
     openai_df = standardize_column_names(openai_df)
     
+    # Ensure rxnorm_rxcui is treated as a string
+    if 'rxnorm_rxcui' in direct_df.columns:
+        direct_df['rxnorm_rxcui'] = direct_df['rxnorm_rxcui'].astype(str)
+    if 'rxnorm_rxcui' in openai_df.columns:
+        openai_df['rxnorm_rxcui'] = openai_df['rxnorm_rxcui'].astype(str)
+    
+    # Translate form names if present
+    if 'original_form' in direct_df.columns:
+        direct_df['display_form'] = direct_df['original_form'].apply(translate_form_names)
+    if 'original_form' in openai_df.columns:
+        openai_df['display_form'] = openai_df['original_form'].apply(translate_form_names)
+    
     st.subheader("📊 Dataset Comparison")
     
     # Find common identifiers between datasets
@@ -815,13 +919,16 @@ def display_dataset_comparison(direct_df, openai_df):
                 if 'original_form' in direct_df.columns and 'original_form' in openai_df.columns:
                     st.subheader("Pharmaceutical Form Distribution")
                     
-                    if direct_df['original_form'].notna().any() and openai_df['original_form'].notna().any():
-                        direct_forms = direct_df['original_form'].value_counts().reset_index()
+                    form_col_direct = 'display_form' if 'display_form' in direct_df.columns else 'original_form'
+                    form_col_openai = 'display_form' if 'display_form' in openai_df.columns else 'original_form'
+                    
+                    if direct_df[form_col_direct].notna().any() and openai_df[form_col_openai].notna().any():
+                        direct_forms = direct_df[form_col_direct].value_counts().reset_index()
                         direct_forms.columns = ['Form', 'Count']
                         direct_forms['Method'] = 'Direct (Mistral)'
                         direct_forms = direct_forms.sort_values('Count', ascending=False).head(10)
                         
-                        openai_forms = openai_df['original_form'].value_counts().reset_index()
+                        openai_forms = openai_df[form_col_openai].value_counts().reset_index()
                         openai_forms.columns = ['Form', 'Count']
                         openai_forms['Method'] = 'OpenAI'
                         openai_forms = openai_forms.sort_values('Count', ascending=False).head(10)
@@ -856,22 +963,23 @@ def display_dataset_comparison(direct_df, openai_df):
                         st.subheader("Common Forms Success Rate Comparison")
                         
                         try:
-                            # Get success rates for common forms
-                            direct_form_success = direct_df.groupby('original_form')['success'].agg(['count', 'sum']).reset_index()
-                            direct_form_success['success_rate'] = direct_form_success['sum'] / direct_form_success['count'] * 100
-                            direct_form_success = direct_form_success.rename(
-                                columns={'count': 'direct_count', 'sum': 'direct_success', 'success_rate': 'direct_rate'})
+                            form_col_direct = 'display_form' if 'display_form' in direct_df.columns else 'original_form'
+                            form_col_openai = 'display_form' if 'display_form' in openai_df.columns else 'original_form'
                             
-                            openai_form_success = openai_df.groupby('original_form')['success'].agg(['count', 'sum']).reset_index()
-                            openai_form_success['success_rate'] = openai_form_success['sum'] / openai_form_success['count'] * 100
-                            openai_form_success = openai_form_success.rename(
-                                columns={'count': 'openai_count', 'sum': 'openai_success', 'success_rate': 'openai_rate'})
+                            # Get success rates for common forms
+                            direct_form_success = direct_df.groupby(form_col_direct)['success'].agg(['count', 'sum']).reset_index()
+                            direct_form_success.columns = ['Form', 'direct_count', 'direct_success']
+                            direct_form_success['direct_rate'] = direct_form_success['direct_success'] / direct_form_success['direct_count'] * 100
+                            
+                            openai_form_success = openai_df.groupby(form_col_openai)['success'].agg(['count', 'sum']).reset_index()
+                            openai_form_success.columns = ['Form', 'openai_count', 'openai_success']
+                            openai_form_success['openai_rate'] = openai_form_success['openai_success'] / openai_form_success['openai_count'] * 100
                             
                             # Find common forms
                             common_forms = pd.merge(
-                                direct_form_success[['original_form', 'direct_count', 'direct_rate']],
-                                openai_form_success[['original_form', 'openai_count', 'openai_rate']],
-                                on='original_form'
+                                direct_form_success[['Form', 'direct_count', 'direct_rate']],
+                                openai_form_success[['Form', 'openai_count', 'openai_rate']],
+                                on='Form'
                             )
                             
                             # Filter to forms with enough data
@@ -885,7 +993,7 @@ def display_dataset_comparison(direct_df, openai_df):
                                 fig = go.Figure()
                                 
                                 fig.add_trace(go.Bar(
-                                    x=common_forms['original_form'],
+                                    x=common_forms['Form'],
                                     y=common_forms['direct_rate'],
                                     name='Direct (Mistral)',
                                     marker_color='#3498db',
@@ -894,7 +1002,7 @@ def display_dataset_comparison(direct_df, openai_df):
                                 ))
                                 
                                 fig.add_trace(go.Bar(
-                                    x=common_forms['original_form'],
+                                    x=common_forms['Form'],
                                     y=common_forms['openai_rate'],
                                     name='OpenAI',
                                     marker_color='#f39c12',
@@ -928,7 +1036,7 @@ def display_dataset_comparison(direct_df, openai_df):
                                         better_openai_display['openai_rate'] = better_openai_display['openai_rate'].round(1).astype(str) + '%'
                                         better_openai_display['rate_diff'] = better_openai_display['rate_diff'].round(1).astype(str) + '%'
                                         
-                                        st.dataframe(better_openai_display[['original_form', 'direct_rate', 'openai_rate', 'rate_diff', 'total_count']])
+                                        st.dataframe(better_openai_display[['Form', 'direct_rate', 'openai_rate', 'rate_diff', 'total_count']])
                                     else:
                                         st.write("No forms where OpenAI performs better")
                                 
@@ -941,7 +1049,7 @@ def display_dataset_comparison(direct_df, openai_df):
                                         better_direct_display['openai_rate'] = better_direct_display['openai_rate'].round(1).astype(str) + '%'
                                         better_direct_display['rate_diff'] = better_direct_display['rate_diff'].round(1).astype(str) + '%'
                                         
-                                        st.dataframe(better_direct_display[['original_form', 'direct_rate', 'openai_rate', 'rate_diff', 'total_count']])
+                                        st.dataframe(better_direct_display[['Form', 'direct_rate', 'openai_rate', 'rate_diff', 'total_count']])
                                     else:
                                         st.write("No forms where Direct performs better")
                             else:
@@ -974,6 +1082,18 @@ def display_matched_products_analysis(direct_df, openai_df):
     # Standardize column names
     direct_df = standardize_column_names(direct_df)
     openai_df = standardize_column_names(openai_df)
+    
+    # Ensure rxnorm_rxcui is treated as a string
+    if 'rxnorm_rxcui' in direct_df.columns:
+        direct_df['rxnorm_rxcui'] = direct_df['rxnorm_rxcui'].astype(str)
+    if 'rxnorm_rxcui' in openai_df.columns:
+        openai_df['rxnorm_rxcui'] = openai_df['rxnorm_rxcui'].astype(str)
+    
+    # Translate form names if present
+    if 'original_form' in direct_df.columns:
+        direct_df['display_form'] = direct_df['original_form'].apply(translate_form_names)
+    if 'original_form' in openai_df.columns:
+        openai_df['display_form'] = openai_df['original_form'].apply(translate_form_names)
     
     st.subheader("🔍 Matched Products Comparison")
     
@@ -1099,10 +1219,17 @@ def display_matched_products_analysis(direct_df, openai_df):
                         lambda pid: direct_matched[direct_matched['id'] == pid]['original_product_name'].iloc[0] 
                         if not direct_matched[direct_matched['id'] == pid].empty else "")
                 
-                if 'original_form' in direct_matched.columns:
+                if 'display_form' in direct_matched.columns:
+                    matched_comparison['form'] = matched_comparison['id'].apply(
+                        lambda pid: direct_matched[direct_matched['id'] == pid]['display_form'].iloc[0] 
+                        if not direct_matched[direct_matched['id'] == pid].empty else "")
+                elif 'original_form' in direct_matched.columns:
                     matched_comparison['form'] = matched_comparison['id'].apply(
                         lambda pid: direct_matched[direct_matched['id'] == pid]['original_form'].iloc[0] 
                         if not direct_matched[direct_matched['id'] == pid].empty else "")
+                    # Translate form names
+                    if 'form' in matched_comparison.columns:
+                        matched_comparison['form'] = matched_comparison['form'].apply(translate_form_names)
                 
                 # Calculate agreement between methods
                 matched_comparison['agreement'] = matched_comparison['direct_success'] == matched_comparison['openai_success']
@@ -1358,7 +1485,7 @@ def display_matched_products_analysis(direct_df, openai_df):
                                 "OpenAI Only Successful",
                                 "Methods Disagree"]
                 
-                filter_selection = st.selectbox("Filter products by category:", filter_options)
+                filter_selection = st.selectbox("Filter products by category:", filter_options, key="matched_filter")
                 
                 # Apply filter
                 if filter_selection == "Both Methods Successful":
@@ -1376,7 +1503,7 @@ def display_matched_products_analysis(direct_df, openai_df):
                 
                 # Search by product name if available
                 if 'product_name' in filtered_data.columns:
-                    search_term = st.text_input("Search by product name:")
+                    search_term = st.text_input("Search by product name:", key="matched_search")
                     if search_term:
                         filtered_data = filtered_data[filtered_data['product_name'].str.contains(search_term, case=False, na=False)]
                 
@@ -1408,13 +1535,14 @@ def display_matched_products_analysis(direct_df, openai_df):
                 st.dataframe(filtered_data[cols_to_display])
                 
                 # Export button
-                if st.button("Export Detailed Comparison"):
+                if st.button("Export Detailed Comparison", key="matched_export"):
                     csv = filtered_data.to_csv(index=False)
                     st.download_button(
                         label="Download CSV",
                         data=csv,
                         file_name="matched_products_comparison.csv",
-                        mime="text/csv"
+                        mime="text/csv",
+                        key="matched_download"
                     )
             except Exception as e:
                 st.error(f"Error in product comparison: {str(e)}")
@@ -1437,12 +1565,45 @@ def display_matched_products_analysis(direct_df, openai_df):
         
         st.info("The dashboard looks for common identifier columns like 'original_code', 'original_product_name', or 'original_dci'. Make sure at least one of these columns exists in both datasets with matching values.")
 
+def extract_ingredient(rxnorm_name):
+    """Extract potential ingredients from RxNorm concept name"""
+    if not rxnorm_name or not isinstance(rxnorm_name, str):
+        return []
+    
+    # Simplistic approach: split by spaces and take words that start with uppercase
+    words = rxnorm_name.split()
+    potential_ingredients = [word for word in words if word and len(word) > 0 and word[0].isupper() and word.lower() not in 
+                          ['oral', 'injection', 'tablet', 'capsule', 'solution', 'pack', 'extended', 'release']]
+    
+    # Also try to extract ingredients based on common patterns
+    # For example: "100 MG acetaminophen / 5 MG oxycodone Oral Tablet" -> ["acetaminophen", "oxycodone"]
+    ingredients = []
+    pattern = r'\b([A-Z][a-z]+(?:\s[a-z]+)?)\b'
+    matches = re.findall(pattern, rxnorm_name)
+    ingredients.extend(matches)
+    
+    # Clean and combine
+    all_ingredients = list(set(potential_ingredients + ingredients))
+    return [ingredient.strip() for ingredient in all_ingredients if len(ingredient.strip()) > 2]
+
 def display_hierarchy_analysis(direct_df, openai_df):
-    """Display RxNorm hierarchy-based analysis"""
+    """Display RxNorm hierarchy-based analysis with explicit widget keys to fix the key error"""
     
     # Standardize column names
     direct_df = standardize_column_names(direct_df)
     openai_df = standardize_column_names(openai_df)
+    
+    # Ensure rxnorm_rxcui is treated as a string
+    if 'rxnorm_rxcui' in direct_df.columns:
+        direct_df['rxnorm_rxcui'] = direct_df['rxnorm_rxcui'].astype(str)
+    if 'rxnorm_rxcui' in openai_df.columns:
+        openai_df['rxnorm_rxcui'] = openai_df['rxnorm_rxcui'].astype(str)
+    
+    # Translate form names if present
+    if 'original_form' in direct_df.columns:
+        direct_df['display_form'] = direct_df['original_form'].apply(translate_form_names)
+    if 'original_form' in openai_df.columns:
+        openai_df['display_form'] = openai_df['original_form'].apply(translate_form_names)
     
     st.subheader("🧩 RxNorm Hierarchy Analysis")
     st.markdown("""
@@ -1659,20 +1820,27 @@ def display_hierarchy_analysis(direct_df, openai_df):
                         - **BN**: Brand Name
                         """)
                     
-                    # Browse examples
+                    # Browse Hierarchy Examples (WITH UNIQUE KEYS)
                     st.subheader("Browse Hierarchy Examples")
                     
-                    # Filter options
+                    # Filter options - Using unique key
                     filter_options = ["All Mappings", "Exact Match", "Hierarchy Difference", "Different Mapping"]
-                    filter_selection = st.selectbox("Filter by relationship type:", filter_options)
+                    filter_selection = st.selectbox(
+                        "Filter by relationship type:", 
+                        filter_options, 
+                        key="hierarchy_filter"
+                    )
                     
                     if filter_selection != "All Mappings":
                         filtered_data = comparison_df[comparison_df['Relationship'] == filter_selection]
                     else:
                         filtered_data = comparison_df
                     
-                    # Search by product name if available
-                    search_term = st.text_input("Search by product name:")
+                    # Search by product name if available - Using unique key
+                    search_term = st.text_input(
+                        "Search by product name:", 
+                        key="hierarchy_search"
+                    )
                     if search_term:
                         filtered_data = filtered_data[filtered_data['Product Name'].str.contains(search_term, case=False, na=False)]
                     
@@ -1683,74 +1851,81 @@ def display_hierarchy_analysis(direct_df, openai_df):
                     if not filtered_data.empty:
                         st.dataframe(filtered_data)
                         
-                        # Export button
-                        if st.button("Export Hierarchy Analysis"):
+                        # Export button - Using unique key
+                        if st.button("Export Hierarchy Analysis", key="hierarchy_export"):
                             csv = filtered_data.to_csv(index=False)
                             st.download_button(
                                 label="Download CSV",
                                 data=csv,
                                 file_name="hierarchy_analysis.csv",
-                                mime="text/csv"
+                                mime="text/csv",
+                                key="hierarchy_download"
                             )
                     
-                    # Show specific examples
-                    if len(filtered_data) > 0:
-                        st.subheader("Example Mappings")
-                        
-                        # Get up to 3 examples of each relationship type
-                        examples = []
-                        for relationship in ['Exact Match', 'Hierarchy Difference', 'Different Mapping']:
-                            relationship_examples = comparison_df[comparison_df['Relationship'] == relationship].head(3)
-                            if not relationship_examples.empty:
-                                examples.append(relationship_examples)
-                        
-                        if examples:
+                    # Show specific examples in a way that avoids the expander key issue
+                    st.subheader("Example Mappings")
+                    
+                    # Get up to 2 examples of each relationship type (avoiding too many widgets)
+                    examples = []
+                    for relationship in ['Exact Match', 'Hierarchy Difference', 'Different Mapping']:
+                        relationship_examples = comparison_df[comparison_df['Relationship'] == relationship].head(2)
+                        if not relationship_examples.empty:
+                            examples.append(relationship_examples)
+                    
+                    if examples:
+                        try:
                             examples_df = pd.concat(examples)
                             
-                            # Create expandable sections for each example
-                            for i, row in examples_df.iterrows():
-                                with st.expander(f"{row['Relationship']}: {row['Product Name']}"):
-                                    col1, col2 = st.columns(2)
+                            # Instead of using expanders with keys, use a simple loop with headers and unique keys for each row
+                            for i, (idx, row) in enumerate(examples_df.iterrows()):
+                                st.write(f"### {row['Relationship']}: {row['Product Name']}")
+                                
+                                col1, col2 = st.columns(2)
+                                
+                                with col1:
+                                    st.markdown("**Direct Mapping**")
+                                    st.write(f"**RxCUI:** {row['Direct RxCUI']}")
+                                    st.write(f"**Name:** {row['Direct Name']}")
+                                    st.write(f"**TTY:** {row['Direct TTY']}")
+                                
+                                with col2:
+                                    st.markdown("**OpenAI Mapping**")
+                                    st.write(f"**RxCUI:** {row['OpenAI RxCUI']}")
+                                    st.write(f"**Name:** {row['OpenAI Name']}")
+                                    st.write(f"**TTY:** {row['OpenAI TTY']}")
+                                
+                                # Add explanations for hierarchy differences
+                                if row['Relationship'] == 'Hierarchy Difference':
+                                    st.markdown("---")
+                                    st.markdown("**Explanation**")
                                     
-                                    with col1:
-                                        st.markdown("**Direct Mapping**")
-                                        st.write(f"**RxCUI:** {row['Direct RxCUI']}")
-                                        st.write(f"**Name:** {row['Direct Name']}")
-                                        st.write(f"**TTY:** {row['Direct TTY']}")
+                                    direct_ingredients = extract_ingredient(row['Direct Name'])
+                                    openai_ingredients = extract_ingredient(row['OpenAI Name'])
                                     
-                                    with col2:
-                                        st.markdown("**OpenAI Mapping**")
-                                        st.write(f"**RxCUI:** {row['OpenAI RxCUI']}")
-                                        st.write(f"**Name:** {row['OpenAI Name']}")
-                                        st.write(f"**TTY:** {row['OpenAI TTY']}")
+                                    st.write(f"Both mappings refer to the same medication but at different hierarchy levels:")
                                     
-                                    # Add explanations for hierarchy differences
-                                    if row['Relationship'] == 'Hierarchy Difference':
-                                        st.markdown("---")
-                                        st.markdown("**Explanation**")
-                                        
-                                        direct_ingredients = extract_ingredient(row['Direct Name'])
-                                        openai_ingredients = extract_ingredient(row['OpenAI Name'])
-                                        
-                                        st.write(f"Both mappings refer to the same medication but at different hierarchy levels:")
-                                        
-                                        # Generic vs branded
-                                        if row['Direct TTY'] in ['SCD', 'SCDC', 'SCDF'] and row['OpenAI TTY'] in ['SBD', 'SBDC', 'SBDF']:
-                                            st.write("Direct mapped to a generic concept while OpenAI mapped to a brand-name concept")
-                                        elif row['Direct TTY'] in ['SBD', 'SBDC', 'SBDF'] and row['OpenAI TTY'] in ['SCD', 'SCDC', 'SCDF']:
-                                            st.write("Direct mapped to a brand-name concept while OpenAI mapped to a generic concept")
-                                        
-                                        # Ingredient vs drug
-                                        if row['Direct TTY'] in ['IN', 'MIN', 'PIN'] and row['OpenAI TTY'] in ['SCD', 'SBD', 'SCDF', 'SBDF']:
-                                            st.write("Direct mapped to an ingredient concept while OpenAI mapped to a drug product concept")
-                                        elif row['OpenAI TTY'] in ['IN', 'MIN', 'PIN'] and row['Direct TTY'] in ['SCD', 'SBD', 'SCDF', 'SBDF']:
-                                            st.write("OpenAI mapped to an ingredient concept while Direct mapped to a drug product concept")
-                        else:
-                            st.info("No example mappings to display.")
+                                    # Generic vs branded
+                                    if row['Direct TTY'] in ['SCD', 'SCDC', 'SCDF'] and row['OpenAI TTY'] in ['SBD', 'SBDC', 'SBDF']:
+                                        st.write("Direct mapped to a generic concept while OpenAI mapped to a brand-name concept")
+                                    elif row['Direct TTY'] in ['SBD', 'SBDC', 'SBDF'] and row['OpenAI TTY'] in ['SCD', 'SCDC', 'SCDF']:
+                                        st.write("Direct mapped to a brand-name concept while OpenAI mapped to a generic concept")
+                                    
+                                    # Ingredient vs drug
+                                    if row['Direct TTY'] in ['IN', 'MIN', 'PIN'] and row['OpenAI TTY'] in ['SCD', 'SBD', 'SCDF', 'SBDF']:
+                                        st.write("Direct mapped to an ingredient concept while OpenAI mapped to a drug product concept")
+                                    elif row['OpenAI TTY'] in ['IN', 'MIN', 'PIN'] and row['Direct TTY'] in ['SCD', 'SBD', 'SCDF', 'SBDF']:
+                                        st.write("OpenAI mapped to an ingredient concept while Direct mapped to a drug product concept")
+                                
+                                st.markdown("---")  # Add separator between examples
+                        except Exception as e:
+                            st.error(f"Error displaying examples: {str(e)}")
+                    else:
+                        st.info("No example mappings to display.")
                 else:
                     st.warning("No products were successfully mapped by both methods. Cannot perform hierarchy analysis.")
             except Exception as e:
                 st.error(f"Error in hierarchy analysis: {str(e)}")
+                st.info("Try checking if your data has the required columns and formats.")
             
             # Found a valid identifier and completed the analysis, so break the loop
             break
@@ -1768,27 +1943,6 @@ def display_hierarchy_analysis(direct_df, openai_df):
             st.write(", ".join(openai_df.columns.tolist()))
         
         st.info("The dashboard looks for common identifier columns like 'original_code', 'original_product_name', or 'original_dci'. Make sure at least one of these columns exists in both datasets with matching values.")
-
-def extract_ingredient(rxnorm_name):
-    """Extract potential ingredients from RxNorm concept name"""
-    if not rxnorm_name or not isinstance(rxnorm_name, str):
-        return []
-    
-    # Simplistic approach: split by spaces and take words that start with uppercase
-    words = rxnorm_name.split()
-    potential_ingredients = [word for word in words if word and len(word) > 0 and word[0].isupper() and word.lower() not in 
-                          ['oral', 'injection', 'tablet', 'capsule', 'solution', 'pack', 'extended', 'release']]
-    
-    # Also try to extract ingredients based on common patterns
-    # For example: "100 MG acetaminophen / 5 MG oxycodone Oral Tablet" -> ["acetaminophen", "oxycodone"]
-    ingredients = []
-    pattern = r'\b([A-Z][a-z]+(?:\s[a-z]+)?)\b'
-    matches = re.findall(pattern, rxnorm_name)
-    ingredients.extend(matches)
-    
-    # Clean and combine
-    all_ingredients = list(set(potential_ingredients + ingredients))
-    return [ingredient.strip() for ingredient in all_ingredients if len(ingredient.strip()) > 2]
 
 if __name__ == "__main__":
     create_dashboard()
